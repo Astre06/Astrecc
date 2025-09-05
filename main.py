@@ -12,20 +12,9 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-
 from telegram.helpers import escape_markdown
-from telegram import __version__ as TG_VER
 
-try:
-    from telegram import __version_info__
-except ImportError:
-    __version_info__ = (0, 0, 0, 0, 0)
-
-if __version_info__ < (20, 0, 0, 'alpha', 1):
-    raise RuntimeError(f"This bot requires at least v20 of python-telegram-bot. "
-                       f"Your current version is {TG_VER}")
-
-from config import TELEGRAM_BOT_TOKEN, MAX_WORKERS, DEFAULT_API_URL
+from config import TELEGRAM_BOT_TOKEN, MAXIMUM_WORKERS, DEFAULT_API_URL
 from auth_processor import (
     generate_uuids,
     prepare_headers,
@@ -35,19 +24,21 @@ from auth_processor import (
 
 SITE_STORAGE_FILE = "sites.txt"
 
+
 def save_sites(sites):
-    # Overwrite sites file with new list of sites
-    with open(SITE_STORAGE_FILE, "w", encoding='utf-8') as f:
+    with open(SITE_STORAGE_FILE, "w", encoding="utf-8") as f:
         for site in sites:
             f.write(site.strip() + "\n")
 
+
 def load_sites():
     try:
-        with open(SITE_STORAGE_FILE, "r", encoding='utf-8') as f:
+        with open(SITE_STORAGE_FILE, "r", encoding="utf-8") as f:
             sites = [line.strip() for line in f if line.strip()]
             return sites if sites else [DEFAULT_API_URL]
     except FileNotFoundError:
         return [DEFAULT_API_URL]
+
 
 def bin_lookup(card_number: str):
     import requests
@@ -69,6 +60,7 @@ def bin_lookup(card_number: str):
     except Exception:
         return f"{bin_number} - ERROR", "Unknown Bank", "Unknown Country"
 
+
 def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low, declined):
     keyboard = [
         [InlineKeyboardButton(f"• {escape_markdown(card, version=2)} •", callback_data="noop")],
@@ -76,7 +68,7 @@ def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low
         [InlineKeyboardButton(f"• CHARGED ➔ [ {charged} ] •", callback_data="noop")],
         [InlineKeyboardButton(f"• CVV ➔ [ {cvv} ] •", callback_data="noop")],
         [InlineKeyboardButton(f"• CCN ➔ [ {ccn} ] •", callback_data="noop")],
-        [InlineKeyboardButton(f"• LOW FUNDS ➔ [ {low} ] •", callback_data="noop")],
+        [InlineKeyboardButton(f"• LOW ➔ [ {low} ] •", callback_data="noop")],
         [InlineKeyboardButton(f"• DECLINED ➔ [ {declined} ] •", callback_data="noop")],
         [InlineKeyboardButton(f"• TOTAL ➔ [ {total} ] •", callback_data="noop")],
         [InlineKeyboardButton("✅ STOP", callback_data="stop")],
@@ -84,30 +76,29 @@ def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low
     return InlineKeyboardMarkup(keyboard)
 
 
-from telegram.helpers import escape_markdown
-msg = (
-    "Send me a .txt file with one card per line in the format:\n"
-    "`card|month|year|cvc`\n"
-    "Example:\n"
-    "`4242424242424242|12|2025|123`"
-)
-await update.message.reply_text(msg, parse_mode="MarkdownV2")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "Send me a .txt file with one card per line in the format:\n"
+        "`card|month|year|cvc`\n"
+        "Example:\n"
+        "`4242424242424242|12|2025|123`"
+    )
+    await update.message.reply_markdown_v2(escape_markdown(msg, version=2))
 
 
 async def site(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("Replace Site(s)", callback_data="replace_site")]
+        [InlineKeyboardButton("Replace Sites", callback_data="replace_site")],
     ]
-    await update.message.reply_text("You want to replace the site(s)?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Do you want to replace sites?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     if query.data == "replace_site":
         await query.message.reply_text(
-            "Please send the site information(s) in the format:\n"
+            "Please send the site information in the format:\n"
             "SITE: https://example.com/my-account/add-payment-method/\n"
             "PAYMENT METHODS: [stripe]\n"
             "RESPONSE: Your Card Was Decline\n"
@@ -115,54 +106,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Or just send URLs, one per line."
         )
         context.user_data["awaiting_sites"] = True
-
     elif query.data == "stop":
-        context.application.bot_data["stop"] = True
-        await query.message.reply_text("Stop command acknowledged. Will stop after current card.")
+        context.bot_data["stop"] = True
+        await query.message.reply_text("Stopping after current card.")
 
 
 async def capture_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("awaiting_sites"):
         return
 
-    sites = []
-    # Extract all URLs from the message text, supports links in any line
-    sites += re.findall(r"https?://[^\s]+", update.message.text)
-    # Also handle SITE: prefix lines
-    sites += re.findall(r"SITE:\s*(https?://[^\s]+)", update.message.text)
-
-    sites = list(set(sites))  # remove duplicates
-
+    text = update.message.text.strip()
+    sites = set(
+        re.findall(r"https?://[^\s]+", text) +
+        re.findall(r"SITE:\s*(https?://[^\s]+)", text)
+    )
     if not sites:
-        await update.message.reply_text("No valid site URLs found. Please send again.")
+        await update.message.reply_text("No valid sites found. Please send again.")
         return
-
-    save_sites(sites)
+    save_sites(list(sites))
     context.user_data["awaiting_sites"] = False
-    await update.message.reply_text(f"Successfully saved {len(sites)} site(s) to be used for checking.")
+    await update.message.reply_text(f"Saved {len(sites)} sites.")
 
 
 async def chk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
-        await update.message.reply_text(
-            "Usage: /chk <card_number> <month|year> <cvc>\nExample:\n"
-            "/chk 4242424242424242 12|25 123"
-        )
+        await update.message.reply_text("Usage: /chk <card> <month|year> <cvc>")
         return
-
-    card_number = args[0]
-    exp = args[1]
+    card = args[0]
+    expiry = args[1]
     cvc = args[2]
-
-    if "|" not in exp:
+    if "|" not in expiry:
         await update.message.reply_text("Expiry must be in MM|YY or MM|YYYY format.")
         return
-
-    card_data = f"{card_number}|{exp}|{cvc}"
-
+    card_data = f"{card}|{expiry}|{cvc}"
     sites = load_sites()
-
     headers = prepare_headers()
     uuids = generate_uuids()
     chat_id = update.effective_chat.id
@@ -179,145 +157,106 @@ async def chk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_token,
         sites,
     )
-
-    await update.message.reply_text(f"{msg}")
+    await update.message.reply_text(msg)
 
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc or not doc.file_name.endswith(".txt"):
-        await update.message.reply_text("❌ Only .txt files are supported. Please upload a valid text file.")
+        await update.message.reply_text("Only .txt files are allowed.")
         return
-
-    file = await update.message.document.get_file()
-    tmp_path = os.path.join(tempfile.gettempdir(), doc.file_name)
-    await file.download_to_drive(tmp_path)
-
-    with open(tmp_path) as f:
-        cards = [line.strip() for line in f if line.strip() and len(line.split("|")) >= 3]
-
+    file = await doc.get_file()
+    path = os.path.join(tempfile.gettempdir(), doc.file_name)
+    await file.download_to_drive(path)
+    with open(path) as f:
+        cards = [line.strip() for line in f if line.strip()]
     if not cards:
-        await update.message.reply_text("File empty or invalid format.")
+        await update.message.reply_text("File is empty or invalid.")
         return
 
-    preparing_msg = await update.message.reply_text("⚙️ Starting card checking...")
+    preparing_msg = await update.message.reply_text("Starting processing...")
     await asyncio.sleep(1)
     await preparing_msg.delete()
 
     total = len(cards)
-    charged, cvv, ccn, low, declined = 0, 0, 0, 0, 0
-    collected_cards = []
+    counts = {"charged": 0, "cvv": 0, "ccn": 0, "low": 0, "declined": 0}
+    collected = []
 
     reply_msg = await update.message.reply_text(
-        f"Checking 0/{total} cards. Please wait...",
-        reply_markup=build_status_keyboard(
-            "Waiting for first card",
-            total,
-            0,
-            "Idle",
-            charged,
-            cvv,
-            ccn,
-            low,
-            declined,
-        ),
+        f"Processing 0/{total}", reply_markup=build_status_keyboard(
+            "Waiting", total, 0, "Idle",
+            counts["charged"], counts["cvv"], counts["ccn"], counts["low"], counts["declined"]
+        )
     )
 
     headers = prepare_headers()
     uuids = generate_uuids()
     chat_id = update.effective_chat.id
     bot_token = context.bot.token
-    context.application.bot_data["stop"] = False
+    context.bot_data["stop"] = False
 
-    async def run_checks():
-        nonlocal charged, cvv, ccn, low, declined
-
-        for idx, card in enumerate(cards, start=1):
-            if context.application.bot_data["stop"]:
-                await update.message.reply_text(f"🛑 Stopped at card {idx}.")
-                break
-
-            status, msg, raw = await asyncio.get_running_loop().run_in_executor(
-                None,
-                check_card_across_sites,
-                card,
-                headers,
-                uuids,
-                chat_id,
-                bot_token,
-                load_sites(),
-            )
-
-            if status == "CHARGED":
-                charged += 1
-            elif status == "CVV":
-                cvv += 1
-                collected_cards.append(f"{raw} | CVV")
-            elif status == "CCN":
-                ccn += 1
-                collected_cards.append(f"{raw} | CCN")
-            elif status == "LOW":
-                low += 1
-            else:
-                declined += 1
-
+    for idx, card in enumerate(cards, start=1):
+        if context.bot_data["stop"]:
+            await update.message.reply_text(f"Stopped at card {idx}.")
+            break
+        status, msg, raw = await asyncio.get_running_loop().run_in_executor(
+            None,
+            check_card_across_sites,
+            card,
+            headers,
+            uuids,
+            chat_id,
+            bot_token,
+            load_sites(),
+        )
+        if status == "CHARGED":
+            counts["charged"] += 1
+        elif status == "CVV":
+            counts["cvv"] += 1
+            collected.append(f"{raw} | CVV")
+        elif status == "CCN":
+            counts["ccn"] += 1
+            collected.append(f"{raw} | CCN")
+        elif status == "LOW":
+            counts["low"] += 1
+        else:
+            counts["declined"] += 1
+        if status != "DECLINED":
             try:
                 bin_info, bank, country = bin_lookup(raw.split("|")[0])
             except Exception:
                 bin_info, bank, country = "Unknown", "Unknown", "Unknown"
-
-            if status != "DECLINED":
-                msg_to_send = (
-                    f"Card: {raw}\n"
-                    f"{msg}\n"
-                    f"Bin Info: {bin_info}\n"
-                    f"Bank: {bank}\n"
-                    f"Country: {country}\n"
-                )
-                await update.message.reply_text(msg_to_send)
-
-            try:
-                await reply_msg.edit_text(
-                    f"Checking {idx}/{total} cards...",
-                    reply_markup=build_status_keyboard(
-                        raw,
-                        total,
-                        idx,
-                        status,
-                        charged,
-                        cvv,
-                        ccn,
-                        low,
-                        declined,
-                    ),
-                )
-            except Exception:
-                pass
-
-        await update.message.reply_text("✅ Finished all checks.")
-
-        if collected_cards:
-            filepath = os.path.join(tempfile.gettempdir(), "collected_cards.txt")
-            with open(filepath, "w") as f:
-                f.write("\n".join(collected_cards))
-            await update.message.reply_document(
-                InputFile(filepath),
-                filename="collected_cards.txt",
-                caption="Collected CVV & CCN cards",
+            reply_text = (
+                f"Card: {raw}\n{msg}\nBin: {bin_info}\nBank: {bank}\nCountry: {country}\nSite: {idx}"
             )
+            await update.message.reply_text(reply_text)
+        try:
+            await reply_msg.edit_text(
+                f"Processing {idx}/{total}",
+                reply_markup=build_status_keyboard(
+                    card, total, idx, status,
+                    counts["charged"], counts["cvv"], counts["ccn"],
+                    counts["low"], counts["declined"]
+                ),
+            )
+        except Exception:
+            pass
 
-    asyncio.create_task(run_checks())
+    await update.message.reply_text("Processing complete.")
+
+    if collected:
+        out_path = os.path.join(tempfile.gettempdir(), "collected_cards.txt")
+        with open(out_path, "w") as f:
+            f.write("\n".join(collected))
+        await update.message.reply_document(
+            InputFile(out_path),
+            filename="collected_cards.txt",
+            caption="Collected flagged cards",
+        )
 
 
-async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Just to handle "noop" callbacks from status keyboard
+async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-
-
-async def stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Handler for the Stop button to stop processing gracefully
-    context.application.bot_data["stop"] = True
-    await update.callback_query.edit_message_text("🛑 Stopping after current card...")
 
 
 def main():
@@ -325,18 +264,17 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("site", site))
-    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(CommandHandler("chk", chk))
-    app.add_handler(CommandHandler("stop", stop_callback))  # Optional text command /stop
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), capture_sites))
+    app.add_handler(CommandHandler("stop", lambda u, c: c.bot_data.update({"stop": True})))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
+    app.add_handler(CallbackQueryHandler(lambda u, c: c.bot_data.update({"stop": True}), pattern="^stop$"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    app.add_handler(CallbackQueryHandler(noop_callback, pattern="^noop$"))
-    app.add_handler(CallbackQueryHandler(stop_callback, pattern="^stop$"))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), capture_sites))
 
-    print("🤖 Bot started...")
+    print("Bot is running...")
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
-
