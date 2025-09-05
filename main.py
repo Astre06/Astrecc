@@ -17,10 +17,8 @@ from telegram.helpers import escape_markdown
 
 from config import TELEGRAM_BOT_TOKEN, MAX_WORKERS, DEFAULT_API_URL
 from auth_processor import (
-    generate_uuids,
-    prepare_headers,
-    check_card_in_site,
-    send_telegram_message,
+    generate_uuids, prepare_headers,
+    process_single_card_for_site, send_telegram_message
 )
 
 SITE_STORAGE_FILE = "sites.txt"
@@ -283,5 +281,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
