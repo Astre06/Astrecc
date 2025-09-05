@@ -84,13 +84,14 @@ def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low
     return InlineKeyboardMarkup(keyboard)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_markdown_v2(
-        "Send me a .txt file with one card per line in the format:\n"
-        "`card|month|year|cvc`\n"
-        "Example:\n"
-        "`4242424242424242|12|2025|123`",
-    )
+from telegram.helpers import escape_markdown
+msg = (
+    "Send me a .txt file with one card per line in the format:\n"
+    "`card|month|year|cvc`\n"
+    "Example:\n"
+    "`4242424242424242|12|2025|123`"
+)
+await update.message.reply_text(msg, parse_mode="MarkdownV2")
 
 
 async def site(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -338,3 +339,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
