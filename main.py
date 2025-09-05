@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 from telegram.helpers import escape_markdown
 
-from config import TELEGRAM_BOT_TOKEN, MAXIMUM_WORKERS, DEFAULT_API_URL
+from config import TELEGRAM_BOT_TOKEN, MAX_WORKERS, DEFAULT_API_URL
 from auth_processor import (
     generate_uuids,
     prepare_headers,
@@ -278,3 +278,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
