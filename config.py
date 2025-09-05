@@ -1,13 +1,11 @@
 # config.py
 
-import os
-
 # Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN = "8326116065:AAEl-k_PLGcqEhphvuTYYF7KwFa1URY6kvA" # Token from cc.py
-TELEGRAM_CHAT_ID = "6679042143" # Chat ID from auth.py
+TELEGRAM_BOT_TOKEN = "8326116065:AAEgkz58BRlmK0Jf5gh0pcZ7yOynrt--5nw"
+TELEGRAM_CHAT_ID = "6679042143"
 
 # Stripe and API Configuration
-API_URL = "https://www.nutritionaledge.co.uk/my-account/add-payment-method/"
+DEFAULT_API_URL = "https://www.nutritionaledge.co.uk/my-account/add-payment-method/"
 STRIPE_URL = "https://api.stripe.com/v1/payment_methods"
 
 # Processing Configuration
