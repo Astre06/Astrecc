@@ -16,7 +16,7 @@ from telegram.ext import (
 from telegram.helpers import escape_markdown
 
 from config import TELEGRAM_BOT_TOKEN, MAX_WORKERS, DEFAULT_API_URL
-from auth import (
+from auth_processor import (
     generate_uuids,
     prepare_headers,
     check_card_in_site,
@@ -283,4 +283,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
