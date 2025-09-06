@@ -56,7 +56,9 @@ def process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, 
         return "DECLINED", msg, card_data
 
     try:
-        number, exp_month, exp_year, cvc = card_data.split('|')
+        # Clean spaces around pipes then split
+        cleaned = re.sub(r'\s*\|\s*', '|', card_data.strip())
+        number, exp_month, exp_year, cvc = cleaned.split('|')
         if len(exp_year) == 4:
             exp_year = exp_year[-2:]
     except Exception:
@@ -140,8 +142,10 @@ def process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, 
         return "DECLINED", msg, card_data
 
 def check_card_across_sites(card_data, headers, uuids, chat_id, bot_token, sites):
-    for idx, site_url in enumerate(sites, start=1):
+    for idx, site_url in enumerate(sites[:10], start=1):  # Limit to 10 sites max
         status, msg, raw = process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, site_url)
-        if status == "CHARGED":
-            return status, f"{msg}\nSite: {idx}", raw
+        if status in ["CHARGED", "CVV", "CCN", "LOW_FUNDS"]:
+            # Append site number to message
+            msg += f"\nSite: {idx}"
+            return status, msg, raw
     return "DECLINED", f"Declined on all sites: {card_data}", card_data
