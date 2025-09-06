@@ -50,7 +50,9 @@ def bin_lookup(card_number: str):
             level = str(data.get("brand", "STANDARD")).upper()
             bank = data.get("bank", {}).get("name", "Unknown Bank")
             country = data.get("country", {}).get("name", "Unknown Country")
-            return f"{bin_number} - {level} - {card_type} - {scheme}", bank, country
+            # Clean country string to remove parentheses and extra descriptors
+            country_clean = re.sub(r"\s*\(.*?\)", "", country).strip()
+            return f"{bin_number} - {level} - {card_type} - {scheme}", bank, country_clean
         else:
             return f"{bin_number} - NOT FOUND", "Unknown Bank", "Unknown Country"
     except Exception:
@@ -136,8 +138,12 @@ async def capture_site_message(update: Update, context: ContextTypes.DEFAULT_TYP
 async def chk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
+    # Send initial processing message which will be deleted later
+    processing_msg = await update.message.reply_text("Processing ⚙️...")
+
     match = re.match(r'^\.?\/?chk\s+(.+)', text, re.IGNORECASE)
     if not match:
+        await processing_msg.delete()
         await update.message.reply_text(
             "Usage: /chk card expiration cvc\n"
             "Example: /chk 4242424242424242 12|25 123\n"
@@ -149,6 +155,7 @@ async def chk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fields = re.split(r'\s*\|\s*', rest)
 
     if len(fields) != 4:
+        await processing_msg.delete()
         await update.message.reply_text(
             "Usage: /chk card expiration cvc\n"
             "Example: /chk 4242424242424242 12|25 123\n"
@@ -177,6 +184,8 @@ async def chk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_token,
         sites,
     )
+
+    await processing_msg.delete()  # Delete the "Processing ..." message
 
     site_num = ""
     site_search = re.search(r"Site: (\d+)", msg)
@@ -249,7 +258,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sites = load_current_site()
 
-    # Create a unique temp file for results using chat_id and original filename
     safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', doc.file_name)
     result_path = os.path.join(tempfile.gettempdir(), f"results_{chat_id}_{safe_filename}")
 
@@ -295,7 +303,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     bin_info, bank, country = "N/A", "N/A", "N/A"
 
                 if status in ["CHARGED", "CVV", "CCN", "LOW_FUNDS"]:
-                    # Write approved cards to the result file only (exclude declined)
                     result_file.write(f"{raw_card}|{status_text}\n")
 
                     msg = (
@@ -337,6 +344,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+# /sitelist command to show all current sites
+async def sitelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sites = load_current_site()
+    if not sites:
+        await update.message.reply_text("No sites are currently set.")
+    else:
+        sites_list = "\n".join([f"{idx+1}. {site}" for idx, site in enumerate(sites)])
+        await update.message.reply_text(f"Current sites:\n{sites_list}")
+
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -344,6 +360,7 @@ def main():
     app.add_handler(CommandHandler("site", site))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(CommandHandler(["chk"], chk))
+    app.add_handler(CommandHandler("sitelist", sitelist))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), capture_site_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
