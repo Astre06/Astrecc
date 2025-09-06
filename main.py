@@ -42,7 +42,7 @@ def bin_lookup(card_number: str):
     bin_number = card_number[:6]
     headers = {"Accept-Version": "3", "User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(f"https://api-ninjas.com/api/bin/{bin_number}", headers=headers, timeout=5)
+        r = requests.get(f"https://api-ninjas.com/api/bin/{bin_number}", headers=headers, timeout=50)
         if r.status_code == 200:
             data = r.json()
             scheme = str(data.get("scheme", "N/A")).upper()
@@ -369,4 +369,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
