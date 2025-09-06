@@ -3,6 +3,7 @@ import tempfile
 import os
 import re
 import requests
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     Application,
@@ -69,7 +70,6 @@ def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low
     if checking:
         keyboard.append([InlineKeyboardButton(" [ STOP ] ", callback_data="stop")])
     else:
-        # Show Replace Sites and Done only when not checking
         keyboard.append([InlineKeyboardButton(" _Replace Sites_ ", callback_data="replace_site")])
         keyboard.append([InlineKeyboardButton(" _Done_ ", callback_data="done_sites")])
     return InlineKeyboardMarkup(keyboard)
@@ -133,7 +133,6 @@ async def capture_site_message(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await update.message.reply_text("No valid URLs detected. Please try again or press _Done_ if finished.")
 
-# Revised chk handler supporting /chk and .chk
 async def chk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
@@ -250,83 +249,93 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sites = load_current_site()
 
-    for idx, card in enumerate(lines, start=1):
-        if context.application.bot_data.get("stop"):
-            await update.message.reply_text(f"⏹ Stopped processing at card {idx}.")
-            break
+    # Create a unique temp file for results using chat_id and original filename
+    safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', doc.file_name)
+    result_path = os.path.join(tempfile.gettempdir(), f"results_{chat_id}_{safe_filename}")
 
-        status, message, raw_card = await loop.run_in_executor(
-            None,
-            check_card_across_sites,
-            card,
-            headers,
-            uuids,
-            chat_id,
-            bot_token,
-            sites,
-        )
+    try:
+        with open(result_path, "w") as result_file:
+            for idx, card in enumerate(lines, start=1):
+                if context.application.bot_data.get("stop"):
+                    await update.message.reply_text(f"⏹ Stopped processing at card {idx}.")
+                    break
 
-        if status == "CHARGED":
-            charged_count += 1
-            status_text = "Charged"
-        elif status == "CVV":
-            cvv_count += 1
-            status_text = "CVV Incorrect"
-            collected_cards.append(f"{raw_card} | CVV")
-        elif status == "CCN":
-            ccn_count += 1
-            status_text = "CCN Live"
-            collected_cards.append(f"{raw_card} | CCN")
-        elif status == "LOW_FUNDS":
-            low_funds_count += 1
-            status_text = "Insufficient Funds"
-        else:
-            declined_count += 1
-            status_text = "Declined"
-
-        try:
-            bin_info, bank, country = bin_lookup(raw_card.split('|')[0])
-        except Exception:
-            bin_info, bank, country = "N/A", "N/A", "N/A"
-
-        if status in ["CHARGED", "CVV", "CCN", "LOW_FUNDS"]:
-            msg = (
-                f"CARD: {raw_card}\n"
-                f"Gateway: Stripe Auth\n"
-                f"Response: {status_text} {'✅' if status in ['CHARGED', 'CVV', 'LOW_FUNDS'] else ''}\n\n"
-                f"Bin Info: {bin_info}\n"
-                f"Bank: {bank}\n"
-                f"Country: {country}"
-            )
-            await update.message.reply_text(msg, parse_mode="HTML")
-
-        try:
-            await reply_msg.edit_text(
-                f"Processing {idx}/{total}...",
-                reply_markup=build_status_keyboard(
-                    raw_card, total, idx, status_text,
-                    charged_count, cvv_count, ccn_count,
-                    low_funds_count, declined_count,
-                    checking=True
+                status, message, raw_card = await loop.run_in_executor(
+                    None,
+                    check_card_across_sites,
+                    card,
+                    headers,
+                    uuids,
+                    chat_id,
+                    bot_token,
+                    sites,
                 )
-            )
+
+                if status == "CHARGED":
+                    charged_count += 1
+                    status_text = "Charged"
+                elif status == "CVV":
+                    cvv_count += 1
+                    status_text = "CVV Incorrect"
+                    collected_cards.append(f"{raw_card} | CVV")
+                elif status == "CCN":
+                    ccn_count += 1
+                    status_text = "CCN Live"
+                    collected_cards.append(f"{raw_card} | CCN")
+                elif status == "LOW_FUNDS":
+                    low_funds_count += 1
+                    status_text = "Insufficient Funds"
+                else:
+                    declined_count += 1
+                    status_text = "Declined"
+
+                try:
+                    bin_info, bank, country = bin_lookup(raw_card.split('|')[0])
+                except Exception:
+                    bin_info, bank, country = "N/A", "N/A", "N/A"
+
+                if status in ["CHARGED", "CVV", "CCN", "LOW_FUNDS"]:
+                    # Write approved cards to the result file only (exclude declined)
+                    result_file.write(f"{raw_card}|{status_text}\n")
+
+                    msg = (
+                        f"CARD: {raw_card}\n"
+                        f"Gateway: Stripe Auth\n"
+                        f"Response: {status_text} {'✅' if status in ['CHARGED', 'CVV', 'LOW_FUNDS'] else ''}\n\n"
+                        f"Bin Info: {bin_info}\n"
+                        f"Bank: {bank}\n"
+                        f"Country: {country}"
+                    )
+                    await update.message.reply_text(msg, parse_mode="HTML")
+
+                try:
+                    await reply_msg.edit_text(
+                        f"Processing {idx}/{total}...",
+                        reply_markup=build_status_keyboard(
+                            raw_card, total, idx, status_text,
+                            charged_count, cvv_count, ccn_count,
+                            low_funds_count, declined_count,
+                            checking=True
+                        )
+                    )
+                except Exception:
+                    pass
+    finally:
+        await update.message.reply_text("✅ Finished processing all cards.")
+        try:
+            await reply_msg.delete()
         except Exception:
             pass
 
-    await update.message.reply_text("✅ Finished processing all cards.")
-    try:
-        await reply_msg.delete()  # Delete inline keyboard message after completion to clean chat
-    except Exception:
-        pass
-
-    if collected_cards:
-        result_file = os.path.join(tempfile.gettempdir(), f"results_{chat_id}_{int(time.time())}.txt")
-        with open(result_file, "w") as f:
-            f.write("\n".join(collected_cards))
+    if os.path.exists(result_path):
         await update.message.reply_document(
-            InputFile(result_file, filename=os.path.basename(result_file)),
-            caption=f"📂 Results ({len(collected_cards)} live CCs)"
+            InputFile(result_path, filename=os.path.basename(result_path)),
+            caption=f"📂 Results ({charged_count + cvv_count + ccn_count + low_funds_count} live CCs)"
         )
+        try:
+            os.remove(result_path)
+        except Exception:
+            pass
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
