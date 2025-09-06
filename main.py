@@ -3,7 +3,6 @@ import tempfile
 import os
 import re
 import requests
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     Application,
@@ -21,16 +20,15 @@ from auth_processor import (
     prepare_headers,
     process_single_card_for_site,
     send_telegram_message,
+    check_card_across_sites,
 )
 
 SITE_STORAGE_FILE = "current_site.txt"
-
 
 def save_current_site(urls):
     with open(SITE_STORAGE_FILE, "w", encoding="utf-8") as f:
         for url in urls:
             f.write(url.strip() + "\n")
-
 
 def load_current_site():
     try:
@@ -39,7 +37,6 @@ def load_current_site():
             return sites if sites else [DEFAULT_API_URL]
     except FileNotFoundError:
         return [DEFAULT_API_URL]
-
 
 def bin_lookup(card_number: str):
     bin_number = card_number[:6]
@@ -59,7 +56,6 @@ def bin_lookup(card_number: str):
     except Exception:
         return f"{bin_number} - ERROR", "Unknown Bank", "Unknown Country"
 
-
 def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low, declined):
     keyboard = [
         [InlineKeyboardButton(f"• {card} •", callback_data="noop")],
@@ -70,10 +66,11 @@ def build_status_keyboard(card, total, processed, status, charged, cvv, ccn, low
         [InlineKeyboardButton(f"• LOW FUNDS ➔ [ {low} ] •", callback_data="noop")],
         [InlineKeyboardButton(f"• DECLINED ➔ [ {declined} ] •", callback_data="noop")],
         [InlineKeyboardButton(f"• TOTAL ➔ [ {total} ] •", callback_data="noop")],
+        [InlineKeyboardButton(" _Replace Sites_ ", callback_data="replace_site")],
+        [InlineKeyboardButton(" _Done_ ", callback_data="done_sites")],
         [InlineKeyboardButton(" [ STOP ] ", callback_data="stop")],
     ]
     return InlineKeyboardMarkup(keyboard)
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
@@ -84,77 +81,125 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_markdown_v2(escape_markdown(msg, version=2))
 
-
 async def site(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("Replace Sites", callback_data="replace_site")]]
-    await update.message.reply_text("Do you want to replace sites?", reply_markup=InlineKeyboardMarkup(keyboard))
-
+    await update.message.reply_text(
+        "Choose an option:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(" _Replace Sites_ ", callback_data="replace_site")],
+            [InlineKeyboardButton(" _Done_ ", callback_data="done_sites")],
+        ])
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     if query.data == "replace_site":
-        await query.message.reply_text(
-            "Please send the site information below in the exact format or just plain URLs, each separated by new lines:\n"
-            "SITE: https://example.com/my-account/add-payment-method/\n"
-            "PAYMENT METHODS: [stripe]\n"
-            "RESPONSE: Your Card Was Decline\n"
-            "STATUS: The site can be used for API and in no-code checker.✅"
-        )
         context.user_data["awaiting_site"] = True
+        context.user_data["site_buffer"] = []
+        await query.message.reply_text(
+            "Please send site URLs (one per message). Send all sites now.\n"
+            "When finished, press the _Done_ button below.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(" _Done_ ", callback_data="done_sites")]])
+        )
+    elif query.data == "done_sites":
+        if context.user_data.get("awaiting_site"):
+            urls = context.user_data.get("site_buffer", [])
+            if urls:
+                save_current_site(urls)
+                await query.message.reply_text(f"Saved {len(urls)} site(s).")
+            else:
+                await query.message.reply_text("No sites were provided. No changes made.")
+            context.user_data["awaiting_site"] = False
+            context.user_data["site_buffer"] = []
+        else:
+            await query.message.reply_text("No site update in progress.")
     elif query.data == "stop":
         context.application.bot_data["stop"] = True
         await query.message.reply_text("Stop signal received. Will stop checking after current card.")
-
+    else:
+        # For noop or unknown callback data
+        pass
 
 async def capture_site_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_site"):
         text = update.message.text
         urls = re.findall(r'https?://[^\s]+', text)
         if urls:
-            save_current_site(urls)
-            context.user_data["awaiting_site"] = False
-            await update.message.reply_text(f"Saved {len(urls)} site(s).")
+            # Append new urls to buffer list
+            context.user_data.setdefault("site_buffer", []).extend(urls)
+            await update.message.reply_text(f"Received {len(urls)} site(s). Send more or press _Done_ when finished.", 
+                                            parse_mode="Markdown")
         else:
-            await update.message.reply_text("No valid URLs detected. Please try again.")
+            await update.message.reply_text("No valid URLs detected. Please try again or press _Done_ if finished.")
 
-
+# Handles both /chk and .chk commands
 async def chk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
         await update.message.reply_text(
-            "Usage: /chk <card_number> <month|year> <cvc>\nExample: /chk 4242424242424242 12|25 123"
+            "Usage: /chk card expiration cvc\nExample: /chk 4242424242424242 12|25 123\n"
+            "Expiration must be in MM|YY or MM|YYYY format."
         )
         return
 
     card_number = args[0]
     exp = args[1]
     cvc = args[2]
+
     if "|" not in exp:
         await update.message.reply_text("Expiry must be in MM|YY or MM|YYYY format.")
         return
 
-    card_data = f"{card_number}|{exp}|{cvc}"
-    sites = load_current_site()
+    # Compose card line, allow for spaces if any, strip outer spaces for consistency
+    card_data = f"{card_number.strip()}|{exp.strip()}|{cvc.strip()}"
 
+    sites = load_current_site()
     headers = prepare_headers()
     uuids = generate_uuids()
     chat_id = update.message.chat_id
     bot_token = TELEGRAM_BOT_TOKEN
 
     loop = asyncio.get_running_loop()
+    # Use the new check_card_across_sites function to test sequentially across sites
     status, msg, raw = await loop.run_in_executor(
         None,
-        process_single_card_for_site,
+        check_card_across_sites,
         card_data,
         headers,
         uuids,
         chat_id,
         bot_token,
-        sites[0] if isinstance(sites, list) else sites,
+        sites,
     )
-    await update.message.reply_text(f"Result: {status}\nMessage: {msg}")
 
+    # Compose structured message with site info from msg
+    # Extract site number from msg for formatting
+    site_num = ""
+    site_search = re.search(r"Site: (\d+)", msg)
+    if site_search:
+        site_num = site_search.group(1)
+        # Remove site info from msg for clean response
+        msg = re.sub(r"\nSite: \d+", "", msg)
+
+    # BIN lookup
+    try:
+        bin_info, bank, country = bin_lookup(raw.split('|')[0])
+    except Exception:
+        bin_info, bank, country = "N/A", "N/A", "N/A"
+
+    # Compose final formatted message
+    final_msg = (
+        f"CARD: {raw}\n"
+        f"Gateway: Stripe Auth\n"
+        f"Response: {status} {'✅' if status == 'CHARGED' else ''}\n"
+        f"Site: {site_num}\n"
+        f"Bin Info: {bin_info}\n"
+        f"Bank: {bank}\n"
+        f"Country: {country}"
+    )
+
+    await update.message.reply_text(final_msg, parse_mode="HTML")
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
@@ -167,7 +212,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(local_path)
 
     with open(local_path, "r") as f:
-        lines = [line.strip() for line in f if line.strip() and len(line.split("|")) == 4]
+        # Strip also spaces around pipes for all lines
+        lines = []
+        for line in f:
+            line = line.strip()
+            if line and len(re.sub(r'\s*\|\s*', '|', line).split('|')) == 4:
+                # Normalize spaces around pipes to consistent format
+                normalized = re.sub(r'\s*\|\s*', '|', line)
+                lines.append(normalized)
 
     total = len(lines)
     if total == 0:
@@ -196,6 +248,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_running_loop()
     context.application.bot_data["stop"] = False
 
+    sites = load_current_site()
+
     for idx, card in enumerate(lines, start=1):
         if context.application.bot_data.get("stop"):
             await update.message.reply_text(f"⏹ Stopped processing at card {idx}.")
@@ -203,13 +257,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         status, message, raw_card = await loop.run_in_executor(
             None,
-            process_single_card_for_site,
+            check_card_across_sites,
             card,
             headers,
             uuids,
             chat_id,
             bot_token,
-            load_current_site()[0],
+            sites,
         )
 
         if status == "CHARGED":
@@ -273,16 +327,20 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("site", site))
+    # Accept both /chk and .chk as command prefixes for the check
+    app.add_handler(CommandHandler(["start"], start))
+    app.add_handler(CommandHandler(["site"], site))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(CommandHandler("chk", chk))
+    app.add_handler(CommandHandler(["chk", "chk"], chk))  # .chk alias handled via filters
+
+    # Capture normal text messages for site if awaiting sites input
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), capture_site_message))
+
+    # Handle uploaded files
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
     print("🤖 Bot is running...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
